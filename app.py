@@ -16,7 +16,7 @@ title = "LightSpeed: Vietnamese Male Voice TTS"
 description = "Vietnam Male Voice TTS."
 config_file = "config.json"
 duration_model_path = "vbx_duration_model.pth"
-lightspeed_model_path = "gen_141k.pth"
+lightspeed_model_path = "gen_232k.pth"
 phone_set_file = "vbx_phone_set.json"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 with open(config_file, "rb") as f:
