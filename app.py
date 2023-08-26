@@ -134,7 +134,7 @@ def text_to_phone_idx(text):
     return tokens
 
 
-def text_to_speech(text):
+def text_to_speech(duration_net, generator, text):
     # prevent too long text
     if len(text) > 500:
         text = text[:500]
@@ -146,9 +146,6 @@ def text_to_speech(text):
     }
 
     # predict phoneme duration
-    duration_net = DurationNet(hps.data.vocab_size, 64, 4).to(device)
-    duration_net.load_state_dict(torch.load(duration_model_path, map_location=device))
-    duration_net = duration_net.eval()
     phone_length = torch.from_numpy(batch["phone_length"].copy()).long().to(device)
     phone_idx = torch.from_numpy(batch["phone_idx"].copy()).long().to(device)
     with torch.inference_mode():
@@ -158,24 +155,7 @@ def text_to_speech(text):
     )
     phone_duration = torch.where(phone_idx == 0, 0, phone_duration)
 
-    generator = SynthesizerTrn(
-        hps.data.vocab_size,
-        hps.data.filter_length // 2 + 1,
-        hps.train.segment_size // hps.data.hop_length,
-        **vars(hps.model),
-    ).to(device)
-    del generator.enc_q
-    ckpt = torch.load(lightspeed_model_path, map_location=device)
-    params = {}
-    for k, v in ckpt["net_g"].items():
-        k = k[7:] if k.startswith("module.") else k
-        params[k] = v
-    generator.load_state_dict(params, strict=False)
-    del ckpt, params
-    generator = generator.eval()
-    # mininum 1 frame for each phone
-    # phone_duration = torch.clamp_min(phone_duration, hps.data.hop_length * 1000 / hps.data.sampling_rate)
-    # phone_duration = torch.where(phone_idx == 0, 0, phone_duration)
+    # generate waveform
     end_time = torch.cumsum(phone_duration, dim=-1)
     start_time = end_time - phone_duration
     start_frame = start_time / 1000 * hps.data.sampling_rate / hps.data.hop_length
@@ -194,8 +174,40 @@ def text_to_speech(text):
     return (wave * (2**15)).astype(np.int16)
 
 
+def load_models():
+    duration_net = DurationNet(hps.data.vocab_size, 64, 4).to(device)
+    duration_net.load_state_dict(torch.load(duration_model_path, map_location=device))
+    duration_net = duration_net.eval()
+    generator = SynthesizerTrn(
+        hps.data.vocab_size,
+        hps.data.filter_length // 2 + 1,
+        hps.train.segment_size // hps.data.hop_length,
+        **vars(hps.model),
+    ).to(device)
+    del generator.enc_q
+    ckpt = torch.load(lightspeed_model_path, map_location=device)
+    params = {}
+    for k, v in ckpt["net_g"].items():
+        k = k[7:] if k.startswith("module.") else k
+        params[k] = v
+    generator.load_state_dict(params, strict=False)
+    del ckpt, params
+    generator = generator.eval()
+    return duration_net, generator
+
+
 def speak(text):
-    y = text_to_speech(text)
+    duration_net, generator = load_models()
+    paragraphs = text.split("\n")
+    clips = []  # list of audio clips
+    # silence = np.zeros(hps.data.sampling_rate // 4)
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if paragraph == "":
+            continue
+        clips.append(text_to_speech(duration_net, generator, paragraph))
+        # clips.append(silence)
+    y = np.concatenate(clips)
     return hps.data.sampling_rate, y
 
 
