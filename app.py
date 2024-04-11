@@ -1,31 +1,30 @@
-import torch  # isort:skip
-
-torch.manual_seed(42)
-import json
-import re
-import unicodedata
-from types import SimpleNamespace
-
-import gradio as gr
-import numpy as np
 import regex
-
+import torch
+import json
+import unicodedata
+import re
+import os
+import numpy as np
+import streamlit as st
+from types import SimpleNamespace
 from models import DurationNet, SynthesizerTrn
 
-title = "LightSpeed: Vietnamese Male Voice TTS"
-description = "Vietnam Male Voice TTS."
-config_file = "config.json"
-duration_model_path = "vbx_duration_model.pth"
-lightspeed_model_path = "gen_619k.pth"
+torch.manual_seed(42)
+
+config_file = "config/config.json"
+duration_model_path = "duration_model/vbx_duration_model.pth"
+lightspeed_model_path = "model_Tacotron/gen_141k.pth"
 phone_set_file = "vbx_phone_set.json"
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Tệp cấu hình
 with open(config_file, "rb") as f:
     hps = json.load(f, object_hook=lambda x: SimpleNamespace(**x))
 
-# load phone set json file
+# Tệp JSON chứa tập hợp cấu 
 with open(phone_set_file, "r") as f:
     phone_set = json.load(f)
-
+    
 assert phone_set[0][1:-1] == "SEP"
 assert "sil" in phone_set
 sil_idx = phone_set.index("sil")
@@ -94,9 +93,9 @@ def read_number(num: str) -> str:
 
 
 def text_to_phone_idx(text):
-    # lowercase
+    # Chuyển đổi chuỗi ký tự thành chữ thường
     text = text.lower()
-    # unicode normalize
+    # Chuẩn hóa chuỗi Unicode
     text = unicodedata.normalize("NFKC", text)
     text = text.replace(".", " . ")
     text = text.replace(",", " , ")
@@ -111,23 +110,23 @@ def text_to_phone_idx(text):
     words = [read_number(w) if num_re.fullmatch(w) else w for w in words]
     text = " ".join(words)
 
-    # remove redundant spaces
+    # loại bỏ các khoảng trắng dư thừa
     text = re.sub(r"\s+", " ", text)
-    # remove leading and trailing spaces
+    # loại bỏ khoảng trắng ở đầu và cuối
     text = text.strip()
-    # convert words to phone indices
+    # chuyển đổi từ thành chỉ số 
     tokens = []
     for c in text:
-        # if c is "," or ".", add <sil> phone
+        # nếu c là ',' hoặc '.', thêm âm vị <sil> thời gian yên lặng" (<silence>)
         if c in ":,.!?;(":
             tokens.append(sil_idx)
         elif c in phone_set:
             tokens.append(phone_set.index(c))
         elif c == " ":
-            # add <sep> phone
+            # thêm âm vị <sep>  "separator" (phân tách) 
             tokens.append(0)
     if tokens[0] != sil_idx:
-        # insert <sil> phone at the beginning
+        # chèn âm vị <sil> ở đầu, yên lặng (silence) 
         tokens = [sil_idx, 0] + tokens
     if tokens[-1] != sil_idx:
         tokens = tokens + [0, sil_idx]
@@ -135,7 +134,7 @@ def text_to_phone_idx(text):
 
 
 def text_to_speech(duration_net, generator, text):
-    # prevent too long text
+    # Cản trở văn bản quá dài
     if len(text) > 500:
         text = text[:500]
 
@@ -145,7 +144,7 @@ def text_to_speech(duration_net, generator, text):
         "phone_length": np.array([len(phone_idx)]),
     }
 
-    # predict phoneme duration
+    # dự đoán thời gian của âm vị
     phone_length = torch.from_numpy(batch["phone_length"].copy()).long().to(device)
     phone_idx = torch.from_numpy(batch["phone_idx"].copy()).long().to(device)
     with torch.inference_mode():
@@ -155,7 +154,7 @@ def text_to_speech(duration_net, generator, text):
     )
     phone_duration = torch.where(phone_idx == 0, 0, phone_duration)
 
-    # generate waveform
+    # tạo ra hình dạng sóng
     end_time = torch.cumsum(phone_duration, dim=-1)
     start_time = end_time - phone_duration
     start_frame = start_time / 1000 * hps.data.sampling_rate / hps.data.hop_length
@@ -173,7 +172,8 @@ def text_to_speech(duration_net, generator, text):
     wave = y_hat[0, 0].data.cpu().numpy()
     return (wave * (2**15)).astype(np.int16)
 
-
+# Load mô hình 
+@st.cache(allow_output_mutation=True)
 def load_models():
     duration_net = DurationNet(hps.data.vocab_size, 64, 4).to(device)
     duration_net.load_state_dict(torch.load(duration_model_path, map_location=device))
@@ -196,35 +196,45 @@ def load_models():
     return duration_net, generator
 
 
-def speak(text):
+# Đường dẫn đến thư mục chứa file txt với nội dung truyện ngắn
+stories_folder = "stories"
+
+# Lấy danh sách các file txt trong thư mục
+story_files = [file for file in os.listdir(stories_folder) if file.endswith(".txt")]
+
+# Tạo một từ điển để lưu trữ nội dung của từng truyện ngắn
+story_contents = {}
+for file in story_files:
+    with open(os.path.join(stories_folder, file), "r", encoding="utf-8") as f:
+        story_contents[file[:-4]] = f.read()
+        
+
+# Streamlit app
+st.title("Audio Book")
+
+# Hiển thị danh sách các truyện ngắn để chọn
+selected_story = st.selectbox("Chọn một truyện ngắn", list(story_contents.keys()))
+
+# Hiển thị nội dung của truyện ngắn
+st.markdown(f"## {selected_story}")
+st.text(story_contents[selected_story])
+
+# Process text and generate speech
+if st.button("Tạo Giọng Đọc"):
+    # Lấy đoạn trích được chọn
+    selected_text = story_contents[selected_story]
+
+    # Xử lý văn bản và tạo giọng nói (sử dụng hàm text_to_speech)
     duration_net, generator = load_models()
-    paragraphs = text.split("\n")
+    paragraphs = selected_text.split("\n")
     clips = []  # list of audio clips
-    # silence = np.zeros(hps.data.sampling_rate // 4)
     for paragraph in paragraphs:
         paragraph = paragraph.strip()
         if paragraph == "":
             continue
         clips.append(text_to_speech(duration_net, generator, paragraph))
-        # clips.append(silence)
-    y = np.concatenate(clips)
-    return hps.data.sampling_rate, y
+    audio = np.concatenate(clips)
 
-
-gr.Interface(
-    fn=speak,
-    inputs="text",
-    outputs="audio",
-    title=title,
-    examples=[
-        "Trăm năm trong cõi người ta, chữ tài chữ mệnh khéo là ghét nhau.",
-        "Đoạn trường tân thanh, thường được biết đến với cái tên đơn giản là Truyện Kiều, là một truyện thơ của đại thi hào Nguyễn Du",
-        "Lục Vân Tiên quê ở huyện Đông Thành, khôi ngô tuấn tú, tài kiêm văn võ. Nghe tin triều đình mở khoa thi, Vân Tiên từ giã thầy xuống núi đua tài.",
-        "Lê Quý Đôn, tên thuở nhỏ là Lê Danh Phương, là vị quan thời Lê trung hưng, cũng là nhà thơ và được mệnh danh là nhà bác học lớn của Việt Nam trong thời phong kiến",
-        "Tất cả mọi người đều sinh ra có quyền bình đẳng. Tạo hóa cho họ những quyền không ai có thể xâm phạm được; trong những quyền ấy, có quyền được sống, quyền tự do và quyền mưu cầu hạnh phúc.",
-    ],
-    description=description,
-    theme="default",
-    allow_screenshot=False,
-    allow_flagging="never",
-).launch(debug=False)
+    # Hiển thị audio
+    sample_rate = hps.data.sampling_rate  # Thay bằng giá trị thực tế của tần số lấy mẫu
+    st.audio(audio, format="audio/wav", start_time=0, sample_rate=sample_rate)
